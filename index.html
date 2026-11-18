@@ -273,6 +273,46 @@ function applyFantasyStyle() {
   map.addLayer({id:'route-glow', type:'line', source:'route', layout:lay, paint:{'line-color':'#58b4ff','line-width':20,'line-blur':9,'line-opacity':.65}}, fs);
   map.addLayer({id:'route-casing', type:'line', source:'route', layout:lay, paint:{'line-color':'#e9f5ff','line-width':10}}, fs);
   map.addLayer({id:'route-line', type:'line', source:'route', layout:lay, paint:{'line-color':'#2f7bff','line-width':6}}, fs);
+  addLava();
+}
+
+// ---------- lava: a stable random third of lakes, ponds and rivers become lava ----------
+function lavaTexture() {
+  const s = 128, c = document.createElement('canvas'); c.width = c.height = s; const x = c.getContext('2d');
+  x.fillStyle = '#7a1606'; x.fillRect(0, 0, s, s);
+  const blob = (cx, cy, r, inner, outer) => { for (const dx of [-s, 0, s]) for (const dy of [-s, 0, s]) {
+    const g = x.createRadialGradient(cx+dx, cy+dy, 0, cx+dx, cy+dy, r); g.addColorStop(0, inner); g.addColorStop(1, outer);
+    x.fillStyle = g; x.beginPath(); x.arc(cx+dx, cy+dy, r, 0, Math.PI*2); x.fill(); } };
+  for (let i = 0; i < 18; i++) blob(Math.random()*s, Math.random()*s, 10 + Math.random()*22, 'rgba(255,110,20,.9)', 'rgba(255,60,0,0)');
+  for (let i = 0; i < 10; i++) blob(Math.random()*s, Math.random()*s, 3 + Math.random()*7, 'rgba(255,230,120,1)', 'rgba(255,170,40,0)');
+  x.strokeStyle = 'rgba(40,10,4,.75)'; x.lineWidth = 2; x.lineCap = 'round'; x.lineJoin = 'round';
+  const cl = v => Math.max(8, Math.min(s-8, v));
+  for (let i = 0; i < 9; i++) {
+    let px = 20 + Math.random()*88, py = 20 + Math.random()*88; x.beginPath(); x.moveTo(px, py);
+    for (let k = 0; k < 4; k++) { px = cl(px + (Math.random()-.5)*30); py = cl(py + (Math.random()-.5)*30); x.lineTo(px, py); }
+    x.stroke();
+  }
+  return x.getImageData(0, 0, s, s);
+}
+function addLava() {
+  if (!map.getLayer('water')) return;
+  try { map.addImage('lava', lavaTexture(), {pixelRatio: 2}); } catch(e) {}
+  const layers = map.getStyle().layers, i = layers.findIndex(l => l.id === 'water');
+  const before = layers[i+1] && layers[i+1].id;
+  const pick = ['==', ['%', ['floor', ['/', ['to-number', ['id'], 1], 10]], 3], 0];
+  const area = ['all', ['!=', ['id'], null], ['!=', ['get', 'class'], 'ocean'], pick];
+  const line = ['case', ['has', 'name'], ['==', ['%', ['length', ['get', 'name']], 3], 0], ['!=', ['id'], null], pick, false];
+  const w = ['interpolate', ['linear'], ['zoom'], 10, 1, 14, 3, 18, 8];
+  const add = l => { try { map.addLayer(Object.assign({source:'openmaptiles'}, l), before); } catch(e) {} };
+  add({id:'fx-lava', type:'fill', 'source-layer':'water', filter:area, paint:{'fill-pattern':'lava'}});
+  add({id:'fx-lava-glow', type:'line', 'source-layer':'water', filter:area, paint:{'line-color':'#ff7a1a', 'line-width':6, 'line-blur':5, 'line-opacity':.8}});
+  add({id:'fx-lava-crust', type:'line', 'source-layer':'water', filter:area, paint:{'line-color':'#2a0c04', 'line-width':1.5}});
+  add({id:'fx-lava-river-glow', type:'line', 'source-layer':'waterway', filter:line, layout:{'line-cap':'round','line-join':'round'},
+       paint:{'line-color':'#ff7a1a', 'line-width':['interpolate', ['linear'], ['zoom'], 10, 4, 14, 9, 18, 20], 'line-blur':4, 'line-opacity':.8}});
+  add({id:'fx-lava-river', type:'line', 'source-layer':'waterway', filter:line, layout:{'line-cap':'round','line-join':'round'},
+       paint:{'line-color':'#ff5a1f', 'line-width':w}});
+  let t = 0;   // slow glowing pulse
+  setInterval(() => { t += .15; const o = .55 + .35*Math.sin(t); sp('fx-lava-glow', 'line-opacity', o); sp('fx-lava-river-glow', 'line-opacity', o); }, 150);
 }
 map.on('load', applyFantasyStyle);
 
