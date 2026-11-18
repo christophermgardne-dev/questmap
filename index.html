@@ -55,6 +55,8 @@ html,body{margin:0;height:100%;overflow:hidden;background:#1a140e;font-family:'I
 .beacon svg{position:absolute;inset:0}
 @keyframes pulse{0%{transform:scale(.6);opacity:1}100%{transform:scale(2.4);opacity:0}}
 .maplibregl-ctrl-attrib{font-size:10px}
+#fog{position:absolute;left:0;top:0;pointer-events:none}
+#fogbtn{margin-top:6px;display:block;margin-left:auto}
 body.navigating #top{top:calc(env(safe-area-inset-top) + 112px)}
 body.navigating #brand{font-size:20px}
 </style>
@@ -65,6 +67,7 @@ body.navigating #brand{font-size:20px}
 <div id="top">
   <div id="brand">QuestMap</div>
   <div id="xpbox"><div id="lvl">Lv 1</div><div id="xpbar"><div id="xpfill"></div></div><div id="xptxt">0 / 250 XP</div></div>
+  <button id="fogbtn" class="btn small">Fog: On</button>
 </div>
 
 <div id="turn" class="hidden"><div id="tarrow"></div><div><div id="tdist"></div><div id="tinstr"></div></div></div>
@@ -105,7 +108,7 @@ const state = {pos:null,heading:0,speed:0,route:null,steps:[],coords:[],cum:[],s
 let follow = true, demoTimer = null, demoMult = 1, rerouting = false;
 
 // ---------- save data (XP etc.) ----------
-let save = {xp:0,level:1,regions:{},quests:0,meters:0};
+let save = {xp:0,level:1,regions:{},quests:0,meters:0,seen:[],fog:true};
 try { const s = JSON.parse(localStorage.getItem('questmap') || 'null'); if (s) save = Object.assign(save, s); } catch(e) {}
 const persist = () => { try { localStorage.setItem('questmap', JSON.stringify(save)); } catch(e) {} };
 const need = l => 250 * l;
@@ -214,7 +217,7 @@ function discover(ll) {   // ~1 km grid cells count as "regions"
   if (save.regions[k]) return;
   const first = Object.keys(save.regions).length === 0;
   save.regions[k] = 1; persist();
-  if (!first) gainXP(25, 'New region discovered!');
+  if (!first) gainXP(25, 'New land revealed!');
 }
 
 // ---------- map ----------
@@ -281,6 +284,67 @@ const dEl = document.createElement('div'); dEl.className = 'beacon';
 dEl.innerHTML = '<svg viewBox="0 0 30 30"><path d="M15 2 L25 15 L15 28 L5 15 Z" fill="#f4c542" stroke="#3b2412" stroke-width="2"/></svg>';
 const destMarker = new maplibregl.Marker({element:dEl});
 
+// ---------- fog of war: black until you've been within 1 mile ----------
+const FOG_R = 1609.34, FOG_EDGE = 250;
+const cellKey = ll => Math.round(ll[1]/.002) + ':' + Math.round(ll[0]/.002);
+const seenKeys = new Set(), buckets = new Map();
+function addSeen(p) {
+  seenKeys.add(cellKey(p));
+  const k = Math.floor(p[1]/.02) + ':' + Math.floor(p[0]/.02);
+  if (!buckets.has(k)) buckets.set(k, []); buckets.get(k).push(p);
+}
+save.seen.forEach(addSeen);
+function reveal(ll) {
+  if (seenKeys.has(cellKey(ll))) return false;
+  const p = [+ll[0].toFixed(5), +ll[1].toFixed(5)]; addSeen(p); save.seen.push(p); persist(); return true;
+}
+function fogAlpha(lng, lat) {   // 0 = clear, 1 = fully fogged, soft edge near 1 mile
+  const kx = 111320*Math.cos(rad(lat)), ky = 110540, bi = Math.floor(lat/.02), bj = Math.floor(lng/.02);
+  const inner = (FOG_R - FOG_EDGE) ** 2; let best = Infinity;
+  for (let i = bi-1; i <= bi+1; i++) for (let j = bj-1; j <= bj+1; j++) {
+    const arr = buckets.get(i + ':' + j); if (!arr) continue;
+    for (const p of arr) {
+      const dx = (p[0]-lng)*kx, dy = (p[1]-lat)*ky, d2 = dx*dx + dy*dy;
+      if (d2 < best) { best = d2; if (best < inner) return 0; }
+    }
+  }
+  return Math.max(0, Math.min(1, (Math.sqrt(best) - (FOG_R - FOG_EDGE)) / FOG_EDGE));
+}
+const fog = document.createElement('canvas'); fog.id = 'fog';
+map.getCanvasContainer().insertBefore(fog, map.getCanvas().nextSibling);
+const fogSmall = document.createElement('canvas');
+function fogLabel() { $('fogbtn').textContent = 'Fog: ' + (save.fog ? 'On' : 'Off'); }
+function drawFog() {
+  const box = map.getContainer(), w = box.clientWidth, h = box.clientHeight, dpr = window.devicePixelRatio || 1;
+  if (fog.width !== Math.round(w*dpr) || fog.height !== Math.round(h*dpr)) {
+    fog.width = Math.round(w*dpr); fog.height = Math.round(h*dpr); fog.style.width = w + 'px'; fog.style.height = h + 'px';
+  }
+  const ctx = fog.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
+  if (!save.fog) return;
+  // sample a coarse screen grid, then scale it up smoothly (works with tilt and rotation)
+  const g = 12, cols = Math.ceil(w/g) + 2, rows = Math.ceil(h/g) + 2;
+  if (fogSmall.width !== cols || fogSmall.height !== rows) { fogSmall.width = cols; fogSmall.height = rows; }
+  const sctx = fogSmall.getContext('2d'), img = sctx.createImageData(cols, rows), px = img.data;
+  for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
+    const ll = map.unproject([x*g, y*g]), o = (y*cols + x) * 4;
+    px[o] = 5; px[o+1] = 4; px[o+2] = 3; px[o+3] = Math.round(255 * fogAlpha(ll.lng, ll.lat));
+  }
+  sctx.putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = true; ctx.globalCompositeOperation = 'source-over';
+  ctx.drawImage(fogSmall, -g/2, -g/2, cols*g, rows*g);
+  if (state.dest && state.coords.length) {   // golden quest trail shows through the fog
+    ctx.globalCompositeOperation = 'source-atop';
+    ctx.beginPath();
+    state.coords.forEach((c, i) => { const p = map.project(c); i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y); });
+    ctx.setLineDash([2, 10]); ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.lineWidth = 5;
+    ctx.strokeStyle = 'rgba(244,197,66,.95)'; ctx.stroke(); ctx.setLineDash([]);
+    ctx.globalCompositeOperation = 'source-over';
+  }
+}
+map.on('render', drawFog);
+map.on('resize', drawFog);
+
 // ---------- position handling ----------
 function onPosition(ll, hd, spd) {
   if (state.pos) {
@@ -295,6 +359,7 @@ function onPosition(ll, hd, spd) {
   player.setLngLat(ll).setRotation(state.heading);
   $('spd').textContent = Math.round(state.speed * 2.23694);
   discover(ll);
+  if (reveal(ll)) map.triggerRepaint();
   if (state.nav) navUpdate();
 }
 function startGPS() {
@@ -352,7 +417,7 @@ async function setDest(ll, name) {
   } catch(e) { $('pinfo').textContent = 'No path found to that place.'; }
 }
 async function getRoute() {
-  if (!state.pos) { state.pos = map.getCenter().toArray(); player.setLngLat(state.pos); }
+  if (!state.pos) { state.pos = map.getCenter().toArray(); player.setLngLat(state.pos); reveal(state.pos); map.triggerRepaint(); }
   const f = state.pos, t = state.dest.ll;
   const js = await (await fetch(`${ROUTER}${f[0]},${f[1]};${t[0]},${t[1]}?overview=full&geometries=geojson&steps=true`)).json();
   if (js.code !== 'Ok' || !js.routes || !js.routes.length) throw new Error('no route');
@@ -445,6 +510,8 @@ $('mult').onclick = () => { demoMult = demoMult === 1 ? 4 : 1; $('mult').textCon
 $('recenter').onclick = () => { follow = true; $('recenter').classList.add('hidden'); };
 map.on('dragstart', () => { if (state.nav) { follow = false; $('recenter').classList.remove('hidden'); } });
 
+$('fogbtn').onclick = () => { save.fog = !save.fog; persist(); fogLabel(); map.triggerRepaint(); };
+fogLabel();
 updateXP();
 startGPS();
 </script>
